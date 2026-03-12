@@ -30,10 +30,10 @@ public class OrderController : ControllerBase
     /// <response code="400">Invalid request data</response>
     /// <response code="429">Too many requests - rate limit exceeded</response>
     [HttpPost]
-    [ProducesResponseType(typeof(CreateOrderResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(CreateOrderResponseDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
-    public async Task<ActionResult<CreateOrderResponse>> CreateOrder([FromBody] CreateOrderRequest request)
+    public async Task<ActionResult<CreateOrderResponseDto>> CreateOrder([FromBody] CreateOrderRequest request)
     {
         if (!ModelState.IsValid)
         {
@@ -44,10 +44,10 @@ public class OrderController : ControllerBase
 
         var orderId = await _service.CreateOrderAsync(request);
 
-        _logger.LogInformation("Order {OrderId} created for customer {CustomerId}", 
+        _logger.LogInformation("Wigit Order {OrderId} created for customer {CustomerId}", 
             orderId, request.CustomerId);
 
-        return Ok(new CreateOrderResponse
+        return Ok(new CreateOrderResponseDto
         {
             OrderId = orderId,
             Status = "Created"
@@ -63,10 +63,10 @@ public class OrderController : ControllerBase
     /// <response code="404">Order not found</response>
     /// <response code="429">Too many requests - rate limit exceeded</response>
     [HttpGet("{orderId}")]
-    [ProducesResponseType(typeof(OrderStatusResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(OrderStatusResponseDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
-    public async Task<ActionResult<OrderStatusResponse>> GetOrder(string orderId)
+    public async Task<ActionResult<OrderStatusResponseDto>> GetOrder(string orderId)
     {
         var order = await _service.GetOrderAsync(orderId);
 
@@ -76,7 +76,7 @@ public class OrderController : ControllerBase
             return NotFound();
         }
 
-        return Ok(new OrderStatusResponse
+        return Ok(new OrderStatusResponseDto
         {
             OrderId = order.OrderId,
             Status = order.Status.ToString(),
@@ -96,7 +96,7 @@ public class OrderController : ControllerBase
     /// Updates order status and fulfillment details
     /// </summary>
     /// <param name="orderId">The unique order identifier</param>
-    /// <param name="request">Status update request with optional fulfillment details</param>
+    /// <param name="requestDto">Status update request with optional fulfillment details</param>
     /// <returns>No content on success</returns>
     /// <response code="204">Order updated successfully</response>
     /// <response code="400">Invalid status value</response>
@@ -107,24 +107,31 @@ public class OrderController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
-    public async Task<IActionResult> UpdateOrderStatus(string orderId, [FromBody] UpdateOrderStatusRequest request)
+    public async Task<IActionResult> UpdateOrderStatus(string orderId, [FromBody] UpdateOrderStatusRequestDto requestDto)
     {
-        if (!Enum.TryParse<OrderStatus>(request.Status, out var status))
+        if (!Enum.TryParse<OrderStatus>(requestDto.Status, out var status))
             return BadRequest(new { Error = "Invalid status value" });
 
         FulfillmentDetails? fulfillment = null;
-        if (!string.IsNullOrEmpty(request.TrackingNumber) || !string.IsNullOrEmpty(request.Carrier))
+        if (!string.IsNullOrEmpty(requestDto.TrackingNumber) || !string.IsNullOrEmpty(requestDto.Carrier))
         {
             fulfillment = new FulfillmentDetails
             {
-                TrackingNumber = request.TrackingNumber,
-                Carrier = request.Carrier,
-                ShippedAt = request.ShippedAt,
-                ErrorMessage = request.ErrorMessage
+                TrackingNumber = requestDto.TrackingNumber,
+                Carrier = requestDto.Carrier,
+                ShippedAt = requestDto.ShippedAt,
+                ErrorMessage = requestDto.ErrorMessage
             };
         }
 
-        var success = await _service.UpdateOrderStatusAsync(orderId, status, fulfillment);
+        // Read optional X-Event-Id header to help with deduplication
+        string? eventId = null;
+        if (Request.Headers.TryGetValue("X-Event-Id", out var values))
+        {
+            eventId = values.FirstOrDefault();
+        }
+
+        var success = await _service.UpdateOrderStatusAsync(orderId, status, fulfillment, eventId);
 
         if (!success)
             return NotFound();

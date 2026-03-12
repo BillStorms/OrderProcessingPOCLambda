@@ -1,6 +1,6 @@
 namespace OrderService.Api.DTOs;
 
-public class UpdateOrderStatusRequest
+public class UpdateOrderStatusRequestDto
 {
     public string Status { get; set; } = null!;
     public string? TrackingNumber { get; set; }

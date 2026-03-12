@@ -6,6 +6,8 @@ namespace OrderService.Infrastructure.Repositories;
 public class InMemoryOrderRepository : IOrderRepository
 {
     private readonly Dictionary<string, Order> _orders = new();
+    private readonly HashSet<string> _processedEvents = new();
+    private readonly object _lock = new();
 
     public Task InsertAsync(Order order)
     {
@@ -23,5 +25,17 @@ public class InMemoryOrderRepository : IOrderRepository
     {
         _orders[order.OrderId] = order;
         return Task.CompletedTask;
+    }
+
+    public Task<bool> TryMarkEventProcessedAsync(string eventId)
+    {
+        lock (_lock)
+        {
+            if (_processedEvents.Contains(eventId))
+                return Task.FromResult(false);
+
+            _processedEvents.Add(eventId);
+            return Task.FromResult(true);
+        }
     }
 }

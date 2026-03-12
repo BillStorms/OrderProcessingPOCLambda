@@ -32,4 +32,26 @@ public class SqlOrderRepository : IOrderRepository
         _context.Orders.Update(order);
         await _context.SaveChangesAsync();
     }
+
+    public async Task<bool> TryMarkEventProcessedAsync(string eventId)
+    {
+        // Attempt to insert a new ProcessedEvent. If the EventId already exists, return false.
+        var pe = new ProcessedEvent
+        {
+            EventId = eventId,
+            ProcessedAt = DateTime.UtcNow
+        };
+
+        try
+        {
+            _context.ProcessedEvents.Add(pe);
+            await _context.SaveChangesAsync();
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            // Likely a unique key violation - event already processed
+            return false;
+        }
+    }
 }

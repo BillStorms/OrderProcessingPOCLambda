@@ -35,6 +35,20 @@ try
         var orderServiceUrl = builder.Configuration["OrderService:BaseUrl"] ?? "http://localhost:5000";
         client.BaseAddress = new Uri(orderServiceUrl);
         client.Timeout = TimeSpan.FromSeconds(30);
+    })
+    .ConfigurePrimaryHttpMessageHandler(() =>
+    {
+        var handler = new HttpClientHandler();
+        
+        // In development, accept self-signed certificates if using HTTPS
+        var environment = builder.Configuration["DOTNET_ENVIRONMENT"] ?? "Production";
+        if (environment == "Development")
+        {
+            handler.ServerCertificateCustomValidationCallback = 
+                HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+        }
+        
+        return handler;
     });
 
     // Register the background worker

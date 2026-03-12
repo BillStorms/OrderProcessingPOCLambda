@@ -57,6 +57,7 @@ public class OrderManagementService : IOrderService
 
         var evt = new OrderCreatedEvent
         {
+            EventId = Guid.NewGuid().ToString(),
             OrderId = order.OrderId,
             Customer = new CustomerInfo
             {
@@ -85,15 +86,33 @@ public class OrderManagementService : IOrderService
         return _repo.GetAsync(orderId);
     }
 
-    public async Task<bool> UpdateOrderStatusAsync(string orderId, OrderStatus status, FulfillmentDetails? fulfillment = null)
+    public async Task<bool> UpdateOrderStatusAsync(string orderId, OrderStatus status, FulfillmentDetails? fulfillment = null, string? eventId = null)
     {
         _logger.LogInformation("Updating order {OrderId} to status {Status}", orderId, status);
+
+        // If an eventId is provided, attempt to mark it as processed to achieve deduplication
+        if (!string.IsNullOrWhiteSpace(eventId))
+        {
+            var marked = await _repo.TryMarkEventProcessedAsync(eventId);
+            if (!marked)
+            {
+                _logger.LogInformation("Event {EventId} already processed - skipping update for Order {OrderId}", eventId, orderId);
+                return true; // Idempotent: event already applied
+            }
+        }
 
         var order = await _repo.GetAsync(orderId);
         if (order == null)
         {
             _logger.LogWarning("Order {OrderId} not found for status update", orderId);
             return false;
+        }
+
+        // Idempotency check: if status and fulfillment details are unchanged, treat as success and skip DB write
+        if (order.Status == status && FulfillmentEquals(order.Fulfillment, fulfillment))
+        {
+            _logger.LogInformation("Idempotent update detected for Order {OrderId} (status {Status}) - skipping DB write", orderId, status);
+            return true;
         }
 
         order.Status = status;
@@ -108,5 +127,17 @@ public class OrderManagementService : IOrderService
 
         _logger.LogInformation("Order {OrderId} updated to status {Status}", orderId, status);
         return true;
+    }
+
+    private bool FulfillmentEquals(FulfillmentDetails? a, FulfillmentDetails? b)
+    {
+        if (a == null && b == null) return true;
+        if (a == null || b == null) return false;
+
+        // Compare relevant fields that determine uniqueness of a fulfillment update
+        return string.Equals(a.TrackingNumber, b.TrackingNumber, StringComparison.Ordinal) &&
+               string.Equals(a.Carrier, b.Carrier, StringComparison.Ordinal) &&
+               Nullable.Equals(a.ShippedAt, b.ShippedAt) &&
+               string.Equals(a.ErrorMessage, b.ErrorMessage, StringComparison.Ordinal);
     }
 }

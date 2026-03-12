@@ -7,5 +7,5 @@ public interface IOrderService
 {
     Task<string> CreateOrderAsync(CreateOrderRequest request);
     Task<Order?> GetOrderAsync(string orderId);
-    Task<bool> UpdateOrderStatusAsync(string orderId, OrderStatus status, FulfillmentDetails? fulfillment = null);
+    Task<bool> UpdateOrderStatusAsync(string orderId, OrderStatus status, FulfillmentDetails? fulfillment = null, string? eventId = null);
 }

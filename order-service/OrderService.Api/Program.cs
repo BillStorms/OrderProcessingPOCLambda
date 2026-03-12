@@ -1,4 +1,3 @@
-
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Diagnostics;
 using AspNetCoreRateLimit;
@@ -80,13 +79,40 @@ try
     // Add services to the container.
     builder.Services.AddControllers();
     builder.Services.AddEndpointsApiExplorer();
+    
+    // Configure Swagger with API versioning support
     builder.Services.AddSwaggerGen(c =>
     {
-        c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo 
-        { 
-            Title = "Order Service API", 
-            Version = "v1",
-            Description = "Order processing service with event-driven architecture"
+        // Add v1 documentation (must match GroupNameFormat "'v'VVV" which generates "v1")
+        c.SwaggerDoc(
+            "v1",
+            new Microsoft.OpenApi.Models.OpenApiInfo
+            {
+                Title = "Order Service API",
+                Version = "v1",
+                Description = "Order processing service with event-driven architecture",
+                Contact = new Microsoft.OpenApi.Models.OpenApiContact
+                {
+                    Name = "Order Service Team",
+                    Email = "orders@example.com"
+                }
+            });
+
+        // Add XML comments from the API assembly
+        var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+        var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+        if (File.Exists(xmlPath))
+        {
+            c.IncludeXmlComments(xmlPath);
+        }
+
+        // Add security scheme for authorization (if needed in future)
+        c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+        {
+            Type = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT",
+            Description = "JWT Authorization header using the Bearer scheme"
         });
     });
 
@@ -108,6 +134,7 @@ try
     // Register application services
     builder.Services.AddScoped<IEventPublisher, KafkaEventPublisher>();
     builder.Services.AddScoped<IOrderService, OrderManagementService>();
+    builder.Services.AddSingleton<ITopicInitializationService, KafkaTopicInitializationService>();
 
     // Add health checks
     var healthChecks = builder.Services.AddHealthChecks();
@@ -129,6 +156,18 @@ try
         tags: new[] { "messaging", "kafka" });
 
     var app = builder.Build();
+
+    // Initialize Kafka topics on startup
+    // This is idempotent - safe to call even if topic already exists
+    try
+    {
+        var topicInitService = app.Services.GetRequiredService<ITopicInitializationService>();
+        await topicInitService.InitializeTopicsAsync();
+    }
+    catch (Exception ex)
+    {
+        Log.Warning(ex, "Kafka topic initialization failed, but continuing with startup");
+    }
 
     // Run database migrations if using SQL
     if (useSqlDatabase)
@@ -159,10 +198,26 @@ try
     app.UseIpRateLimiting();
 
     // Configure the HTTP request pipeline.
-    if (app.Environment.IsDevelopment())
+    // Enable Swagger in Development and allow via configuration for other environments
+    var enableSwagger = app.Environment.IsDevelopment() || 
+                       builder.Configuration.GetValue<bool>("Swagger:EnableInProduction");
+    
+    if (enableSwagger)
     {
         app.UseSwagger();
-        app.UseSwaggerUI();
+        app.UseSwaggerUI(c =>
+        {
+            c.SwaggerEndpoint("/swagger/v1/swagger.json", "Order Service API v1");
+            c.RoutePrefix = "swagger"; // Swagger UI at /swagger
+            c.DefaultModelsExpandDepth(2);
+            c.DefaultModelExpandDepth(1);
+            c.DocExpansion(Swashbuckle.AspNetCore.SwaggerUI.DocExpansion.List);
+            c.EnableDeepLinking();
+            c.ShowExtensions();
+            c.ShowCommonExtensions();
+        });
+        
+        Log.Information("Swagger UI enabled at /swagger");
     }
 
     // Security: Enable CORS

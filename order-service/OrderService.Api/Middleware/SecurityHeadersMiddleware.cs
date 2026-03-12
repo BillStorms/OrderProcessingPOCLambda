@@ -14,6 +14,24 @@ public class SecurityHeadersMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        // If the request targets the Swagger UI or its static assets, skip adding strict headers
+        // This avoids blocking the Swagger UI's scripts/styles/fetches by CSP while keeping the
+        // strict headers in place for the rest of the application.
+        var path = context.Request.Path.Value ?? string.Empty;
+        if (path.StartsWith("/swagger", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/swagger-ui", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("swagger-ui-bundle.js", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("swagger-ui-standalone-preset.js", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("swagger-ui.css", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("favicon-32x32.png", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("favicon-16x16.png", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("/swagger.json", StringComparison.OrdinalIgnoreCase)
+            )
+        {
+            await _next(context);
+            return;
+        }
+
         // HTTP Strict Transport Security (HSTS)
         // Tells browsers to only use HTTPS for future requests
         context.Response.Headers.Append("Strict-Transport-Security", "max-age=31536000; includeSubDomains");

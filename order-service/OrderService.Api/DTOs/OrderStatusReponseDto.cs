@@ -1,6 +1,6 @@
 namespace OrderService.Api.DTOs;
 
-public class OrderStatusResponse
+public class OrderStatusResponseDto
 {
     public string OrderId { get; set; } = null!;
     public string Status { get; set; } = null!;

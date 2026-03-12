@@ -10,6 +10,7 @@ public class OrderDbContext : DbContext
     }
 
     public DbSet<Order> Orders { get; set; } = null!;
+    public DbSet<ProcessedEvent> ProcessedEvents { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -40,6 +41,13 @@ public class OrderDbContext : DbContext
                 fulfillment.Property(f => f.ShippedAt);
                 fulfillment.Property(f => f.ErrorMessage);
             });
+        });
+
+        modelBuilder.Entity<ProcessedEvent>(pe =>
+        {
+            pe.HasKey(p => p.EventId);
+            pe.Property(p => p.EventId).IsRequired();
+            pe.Property(p => p.ProcessedAt).IsRequired();
         });
     }
 }

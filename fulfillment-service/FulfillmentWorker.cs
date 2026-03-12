@@ -57,7 +57,18 @@ public class FulfillmentWorker : BackgroundService
                     _logger.LogInformation("Received message from Kafka. Key: {Key}, Offset: {Offset}", 
                         consumeResult.Message.Key, consumeResult.Offset);
 
-                    await ProcessOrderEventAsync(consumeResult.Message.Value, stoppingToken);
+                    // Extract event-id header if present
+                    string? eventId = null;
+                    if (consumeResult.Message.Headers != null)
+                    {
+                        var header = consumeResult.Message.Headers.GetLastBytes("event-id");
+                        if (header != null)
+                        {
+                            eventId = System.Text.Encoding.UTF8.GetString(header);
+                        }
+                    }
+
+                    await ProcessOrderEventAsync(consumeResult.Message.Value, eventId, stoppingToken);
 
                     // Commit offset after successful processing
                     _consumer.Commit(consumeResult);
@@ -81,7 +92,7 @@ public class FulfillmentWorker : BackgroundService
         }
     }
 
-    private async Task ProcessOrderEventAsync(string messageValue, CancellationToken cancellationToken)
+    private async Task ProcessOrderEventAsync(string messageValue, string? eventId, CancellationToken cancellationToken)
     {
         var orderEvent = JsonSerializer.Deserialize<OrderCreatedEvent>(messageValue);
         
@@ -95,7 +106,7 @@ public class FulfillmentWorker : BackgroundService
             orderEvent.OrderId, orderEvent.Metadata.CorrelationId);
 
         // Update order status to Processing
-        await UpdateOrderStatusAsync(orderEvent.OrderId, "Processing", orderEvent.Metadata.CorrelationId, null);
+        await UpdateOrderStatusAsync(orderEvent.OrderId, "Processing", orderEvent.Metadata.CorrelationId, null, eventId);
 
         // Process shipment
         var shipmentResult = await _shippingProvider.ProcessShipmentAsync(
@@ -114,7 +125,8 @@ public class FulfillmentWorker : BackgroundService
                     TrackingNumber = shipmentResult.TrackingNumber,
                     Carrier = shipmentResult.Carrier,
                     ShippedAt = shipmentResult.ShippedAt
-                });
+                },
+                eventId);
         }
         else
         {
@@ -125,11 +137,12 @@ public class FulfillmentWorker : BackgroundService
                 new
                 {
                     ErrorMessage = shipmentResult.ErrorMessage
-                });
+                },
+                eventId);
         }
     }
 
-    private async Task UpdateOrderStatusAsync(string orderId, string status, string correlationId, object? additionalData)
+    private async Task UpdateOrderStatusAsync(string orderId, string status, string correlationId, object? additionalData, string? eventId)
     {
         try
         {
@@ -152,7 +165,17 @@ public class FulfillmentWorker : BackgroundService
 
             // The Order Service exposes endpoints under /api/v1/orders (API versioning).
             // Ensure the worker calls the versioned route so the request is routed correctly.
-            var response = await _httpClient.PatchAsync($"/api/v1/orders/{orderId}/status", content);
+            var request = new HttpRequestMessage(HttpMethod.Patch, $"/api/v1/orders/{orderId}/status")
+            {
+                Content = content
+            };
+
+            if (!string.IsNullOrWhiteSpace(eventId))
+            {
+                request.Headers.Add("X-Event-Id", eventId);
+            }
+
+            var response = await _httpClient.SendAsync(request);
             
             if (response.IsSuccessStatusCode)
             {
