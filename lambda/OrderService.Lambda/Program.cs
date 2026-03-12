@@ -10,7 +10,6 @@ using OrderService.Service.Interfaces;
 using OrderService.Service.Services;
 using OrderProcessingSystemPOC.Shared.LambdaMigration.Shared.Idempotency;
 using OrderService.Lambda.Infrastructure;
-using OrderService.Infrastructure.Kafka;
 
 // ── Lambda entry-point: ASP.NET Core hosted inside Lambda via the
 //    Amazon.Lambda.AspNetCoreServer.Hosting adapter.
@@ -103,8 +102,6 @@ else
 // ── Event publisher: SQS replaces Kafka ─────────────────────────────────────
 builder.Services.AddScoped<IEventPublisher, SqsEventPublisher>();
 
-// ── Kafka topic init: no-op in Lambda (SQS handles messaging) ───────────────
-builder.Services.AddSingleton<ITopicInitializationService, NoOpTopicInitializationService>();
 
 // ── Application services ─────────────────────────────────────────────────────
 builder.Services.AddScoped<IOrderService, OrderManagementService>();

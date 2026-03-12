@@ -6,7 +6,7 @@ using OrderService.Service.Interfaces;
 using OrderService.Service.Services;
 using OrderService.Infrastructure.Data;
 using OrderService.Infrastructure.Repositories;
-using OrderService.Infrastructure.Kafka;
+using OrderService.Infrastructure.Events;
 using OrderService.Api.Extensions;
 using OrderService.Api.Middleware;
 using Serilog;
@@ -132,9 +132,10 @@ try
     }
 
     // Register application services
-    builder.Services.AddScoped<IEventPublisher, KafkaEventPublisher>();
+    // Note: In production the Lambda entry-point (OrderService.Lambda) overrides this
+    // with SqsEventPublisher. NoOpEventPublisher is used for local/standalone runs.
+    builder.Services.AddScoped<IEventPublisher, NoOpEventPublisher>();
     builder.Services.AddScoped<IOrderService, OrderManagementService>();
-    builder.Services.AddSingleton<ITopicInitializationService, KafkaTopicInitializationService>();
 
     // Add health checks
     var healthChecks = builder.Services.AddHealthChecks();
@@ -147,27 +148,9 @@ try
             tags: new[] { "database", "sql" });
     }
 
-    healthChecks.AddKafka(
-        new Confluent.Kafka.ProducerConfig
-        {
-            BootstrapServers = builder.Configuration["Kafka:BootstrapServers"] ?? "localhost:9092"
-        },
-        name: "kafka",
-        tags: new[] { "messaging", "kafka" });
 
     var app = builder.Build();
 
-    // Initialize Kafka topics on startup
-    // This is idempotent - safe to call even if topic already exists
-    try
-    {
-        var topicInitService = app.Services.GetRequiredService<ITopicInitializationService>();
-        await topicInitService.InitializeTopicsAsync();
-    }
-    catch (Exception ex)
-    {
-        Log.Warning(ex, "Kafka topic initialization failed, but continuing with startup");
-    }
 
     // Run database migrations if using SQL
     if (useSqlDatabase)

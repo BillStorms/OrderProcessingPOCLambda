@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  OrderProcessingSystem — Lambda + SQS + DynamoDB deployment
+  Replaces the ECS/Fargate + Kafka topology with a serverless equivalent.
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  OrderServiceDbConnectionString:
+    Type: String
+    Default: ""
+    Description: "RDS SQL Server connection string (leave blank to use in-memory store)"
+  OrderServiceBaseUrl:
+    Type: String
+    Description: "Base URL the fulfillment Lambda uses to PATCH order status (e.g. https://api.example.com)"
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+Globals:
+  Function:
+    Runtime: dotnet8
+    Architectures: [arm64]          # Graviton2 — cheaper & faster for .NET 8
+    MemorySize: 512
+    Timeout: 30
+    Environment:
+      Variables:
+        ASPNETCORE_ENVIRONMENT: !Ref Environment
+        DynamoDB__IdempotencyTable: !Ref IdempotencyTable
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── DynamoDB: idempotency store ────────────────────────────────────────────
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "order-idempotency-${Environment}"
+      BillingMode: PAY_PER_REQUEST        # on-demand — no cost when idle
+      AttributeDefinitions:
+        - AttributeName: EventId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: EventId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ExpiresAt
+        Enabled: true
+
+  # ── SQS: order-events queue + dead-letter queue ────────────────────────────
+  OrderEventsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "order-events-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600   # 14 days
+
+  OrderEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "order-events-${Environment}"
+      VisibilityTimeout: 60             # must be >= Lambda timeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderEventsDLQ.Arn
+        maxReceiveCount: 3              # retry 3 times then → DLQ
+
+  # ── IAM: shared execution role ─────────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "order-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: OrderLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # DynamoDB idempotency table
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt IdempotencyTable.Arn
+              # SQS — order service publishes, fulfillment service consumes
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt OrderEventsQueue.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt OrderEventsQueue.Arn
+
+  # ── Lambda: Order Service (API Gateway HTTP API trigger) ───────────────────
+  OrderServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "order-service-${Environment}"
+      CodeUri: .aws-sam/build/OrderServiceFunction/
+      Handler: OrderService.Lambda
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          SQS__OrderEventsQueueUrl: !Ref OrderEventsQueue
+          ConnectionStrings__OrderDatabase: !Ref OrderServiceDbConnectionString
+          SWAGGER_TOKEN: ""  # optional token to protect swagger UI (set via deploy-time param)
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OrderApi
+            Path: /{proxy+}
+            Method: ANY
+            Auth:
+              Authorizer: CognitoAuthorizer
+        # Unprotected static UI entry so index.html can be loaded in the browser
+        SwaggerIndexEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OrderApi
+            Path: /swagger/index.html
+            Method: GET
+        # Unprotected static assets for the Swagger UI (CSS/JS/images)
+        SwaggerAssetsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OrderApi
+            Path: /swagger/{asset+}
+            Method: GET
+        # Make swagger JSON public so the UI can render and show Authorize button
+        SwaggerJsonEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OrderApi
+            Path: /swagger/v1/swagger.json
+            Method: GET
+
+  # ── Lambda: Fulfillment Service (SQS trigger) ──────────────────────────────
+  FulfillmentServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "fulfillment-service-${Environment}"
+      CodeUri: .aws-sam/build/FulfillmentServiceFunction/
+      Handler: FulfillmentService.Lambda::FulfillmentService.Lambda.FulfillmentHandler::HandleAsync
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          OrderService__BaseUrl: !Ref OrderServiceBaseUrl
+      Events:
+        SqsTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrderEventsQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures   # partial batch failure support
+
+  # ── API Gateway: HTTP API ──────────────────────────────────────────────────
+  OrderApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - PATCH
+          - DELETE
+        AllowHeaders:
+          - "*"
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            JwtConfiguration:
+              # Audience is the app client id
+              Audience:
+                - !Ref CognitoUserPoolClient
+              Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+            IdentitySource: "$request.header.Authorization"
+
+# ── Cognito: protect the Swagger UI (developer docs) ─────────────────────────
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "order-service-docs-${Environment}"
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AutoVerifiedAttributes: []
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "order-service-docs-client-${Environment}"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ADMIN_NO_SRP_AUTH
+        - USER_PASSWORD_AUTH
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+Outputs:
+  ApiEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${OrderApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+
+  OrderServiceFunctionArn:
+    Value: !GetAtt OrderServiceFunction.Arn
+
+  FulfillmentServiceFunctionArn:
+    Value: !GetAtt FulfillmentServiceFunction.Arn
+
+  OrderEventsQueueUrl:
+    Value: !Ref OrderEventsQueue
+
+  IdempotencyTableName:
+    Value: !Ref IdempotencyTable
+
+  CognitoUserPoolId:
+    Description: "Cognito User Pool Id for docs protection"
+    Value: !Ref CognitoUserPool
+
+  CognitoUserPoolClientId:
+    Description: "Cognito User Pool Client Id (use this as JWT audience)"
+    Value: !Ref CognitoUserPoolClient

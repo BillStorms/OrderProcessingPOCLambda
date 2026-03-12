@@ -35,4 +35,8 @@ RUN dotnet publish "OrderService.Api.csproj" -c Release -o /app/publish /p:UseAp
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
+
+# Create https directory for certificate mount
+RUN mkdir -p /https && chmod 755 /https
+
 ENTRYPOINT ["dotnet", "OrderService.Api.dll"]

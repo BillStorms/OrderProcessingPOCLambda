@@ -1,5 +1,8 @@
+# Local development compose file.
+# The production deployment uses AWS Lambda + SQS + DynamoDB (see template.yaml).
+# This file is only used to run the Order Service API locally against a real SQL Server instance.
 services:
-  # SQL Server Database
+  # SQL Server — used when UseSqlDatabase=true in appsettings
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     platform: linux/amd64
@@ -21,65 +24,14 @@ services:
       retries: 20
       start_period: 180s
 
-  # Zookeeper (required for Kafka)
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    container_name: order-zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
-    networks:
-      - order-processing-network
-    healthcheck:
-      test: echo stat | nc localhost 2181
-      interval: 10s
-      timeout: 10s
-      retries: 3
-
-  # Kafka
-  kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    container_name: order-kafka
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-    ports:
-      - "9092:9092"
-      - "29092:29092"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    networks:
-      - order-processing-network
-    healthcheck:
-      test: kafka-broker-api-versions --bootstrap-server=localhost:9092
-      interval: 10s
-      timeout: 10s
-      retries: 5
-
-  # Order Service API
+  # Order Service API (local dev — in-memory store, no SQL required by default)
   order-service:
     build:
       context: .
       dockerfile: order-service/Dockerfile
     container_name: order-service-api
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8080'"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
     depends_on:
       sqlserver:
-        condition: service_healthy
-      kafka:
         condition: service_healthy
     ports:
       - "5000:8080"
@@ -87,36 +39,16 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__OrderDatabase: "Server=sqlserver,1433;Database=OrderServiceDb;User Id=sa;Password=${SQL_SA_PASSWORD};TrustServerCertificate=True;"
-      Kafka__BootstrapServers: "kafka:29092"
-      Kafka__Topic: "order-events"
-      UseSqlDatabase: "true"
+      UseSqlDatabase: "false"
     networks:
       - order-processing-network
     restart: on-failure
-
-  # Fulfillment Service Worker
-  fulfillment-service:
-    build:
-      context: .
-      dockerfile: fulfillment-service/Dockerfile
-    container_name: fulfillment-service-worker
-    depends_on:
-      kafka:
-        condition: service_healthy
-      order-service:
-        condition: service_healthy
-    environment:
-      DOTNET_ENVIRONMENT: Development
-      Kafka__BootstrapServers: "kafka:29092"
-      Kafka__Topic: "order-events"
-      Kafka__GroupId: "fulfillment-service-group"
-      OrderService__BaseUrl: "http://order-service:8080"
-      Shipping__MinDelaySeconds: "1"
-      Shipping__MaxDelaySeconds: "5"
-      Shipping__FailureRate: "0.15"
-    networks:
-      - order-processing-network
-    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8080'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
 networks:
   order-processing-network:
