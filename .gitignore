@@ -26,7 +26,8 @@ Thumbs.db
 # Docker / env
 .env
 .env.*
-!.env.example
+.env.example
+.dockerignore
 .aws-sam/
 **/TestResults/
 docs/
