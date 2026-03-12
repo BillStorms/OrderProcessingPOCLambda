@@ -26,6 +26,7 @@ public class FulfillmentHandler
     private readonly IHttpClientFactory   _httpFactory;
     private readonly ILogger<FulfillmentHandler> _logger;
     private readonly string               _orderServiceBaseUrl;
+    private readonly string               _internalToken;
 
     /// <summary>
     /// Parameterless constructor used by the Lambda runtime.
@@ -44,6 +45,7 @@ public class FulfillmentHandler
         var config           = services.GetRequiredService<IConfiguration>();
         _orderServiceBaseUrl = config["OrderService:BaseUrl"]
             ?? throw new InvalidOperationException("OrderService:BaseUrl is not configured");
+        _internalToken = config["INTERNAL_TOKEN"] ?? string.Empty;
     }
 
     // ── Lambda entry point ──────────────────────────────────────────────────
@@ -111,7 +113,7 @@ public class FulfillmentHandler
             evt.OrderId, evt.CorrelationId);
 
         // ── Mark order as Processing ────────────────────────────────────────
-        await PatchOrderStatusAsync(evt.OrderId, "Processing", null, eventId);
+        await PatchOrderStatusAsync(evt.OrderId, "Processing", null, $"{eventId}#processing");
 
         // ── Run shipment ────────────────────────────────────────────────────
         var result = await _shipping.ProcessShipmentAsync(evt.OrderId, evt.CorrelationId ?? evt.OrderId);
@@ -123,14 +125,14 @@ public class FulfillmentHandler
                 result.TrackingNumber,
                 result.Carrier,
                 result.ShippedAt
-            }, eventId);
+            }, $"{eventId}#shipped");
         }
         else
         {
             await PatchOrderStatusAsync(evt.OrderId, "Failed", new
             {
                 result.ErrorMessage
-            }, eventId);
+            }, $"{eventId}#failed");
         }
     }
 
@@ -149,15 +151,17 @@ public class FulfillmentHandler
                           System.Text.Encoding.UTF8, "application/json");
         var client  = _httpFactory.CreateClient("OrderService");
         var request = new HttpRequestMessage(HttpMethod.Patch,
-                          $"{_orderServiceBaseUrl}/api/v1/orders/{orderId}/status")
+                          $"{_orderServiceBaseUrl}/api/v1/orders/{orderId}/status/internal")
         {
             Content = body
         };
         request.Headers.Add("X-Event-Id", eventId);
+        if (!string.IsNullOrWhiteSpace(_internalToken))
+            request.Headers.Add("X-Internal-Token", _internalToken);
 
         var response = await client.SendAsync(request);
         if (!response.IsSuccessStatusCode)
-            _logger.LogError("PATCH /orders/{OrderId}/status returned {Status}", orderId, response.StatusCode);
+            _logger.LogError("PATCH /orders/{OrderId}/status/internal returned {Status}", orderId, response.StatusCode);
     }
 
     // ── DI bootstrap (used by parameterless constructor) ────────────────────
@@ -171,6 +175,8 @@ public class FulfillmentHandler
         var services = new ServiceCollection();
         services.AddSingleton<IConfiguration>(config);
         services.AddLogging(b => b.AddConsole());
+
+        // Plain named HTTP client — auth is handled via X-Internal-Token header at call time.
         services.AddHttpClient("OrderService");
 
         // Idempotency: DynamoDB in production, InMemory locally
@@ -191,4 +197,3 @@ public class FulfillmentHandler
         return services.BuildServiceProvider();
     }
 }
-

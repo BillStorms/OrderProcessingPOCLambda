@@ -10,6 +10,7 @@ using OrderService.Service.Interfaces;
 using OrderService.Service.Services;
 using OrderProcessingSystemPOC.Shared.LambdaMigration.Shared.Idempotency;
 using OrderService.Lambda.Infrastructure;
+using System.Text.Json.Serialization;
 
 // ── Lambda entry-point: ASP.NET Core hosted inside Lambda via the
 //    Amazon.Lambda.AspNetCoreServer.Hosting adapter.
@@ -53,7 +54,10 @@ builder.Services.AddApiVersioning(options =>
 });
 
 // ── MVC + Swagger ────────────────────────────────────────────────────────────
-builder.Services.AddControllers();
+builder.Services.AddControllers().AddJsonOptions(options =>
+{
+    options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -88,8 +92,19 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // ── Data / Repositories ──────────────────────────────────────────────────────
+var ordersTableName = builder.Configuration["DynamoDB:OrdersTable"];
+var processedEventsTableName = builder.Configuration["DynamoDB:IdempotencyTable"];
 var connectionString = builder.Configuration.GetConnectionString("OrderDatabase");
-if (!string.IsNullOrWhiteSpace(connectionString))
+
+if (!string.IsNullOrWhiteSpace(ordersTableName))
+{
+    builder.Services.AddScoped<IOrderRepository>(sp =>
+        new DynamoDbOrderRepository(
+            sp.GetRequiredService<IAmazonDynamoDB>(),
+            ordersTableName,
+            processedEventsTableName));
+}
+else if (!string.IsNullOrWhiteSpace(connectionString))
 {
     builder.Services.AddDbContext<OrderDbContext>(opt => opt.UseSqlServer(connectionString));
     builder.Services.AddScoped<IOrderRepository, SqlOrderRepository>();

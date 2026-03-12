@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <AWSProjectType>Lambda</AWSProjectType>
     <AssemblyName>FulfillmentService.Lambda</AssemblyName>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
   </PropertyGroup>
 
   <ItemGroup>

@@ -11,6 +11,7 @@ using OrderService.Api.Extensions;
 using OrderService.Api.Middleware;
 using Serilog;
 using Serilog.Formatting.Json;
+using System.Text.Json.Serialization;
 
 // Configure Serilog
 Log.Logger = new LoggerConfiguration()
@@ -77,7 +78,10 @@ try
     });
 
     // Add services to the container.
-    builder.Services.AddControllers();
+    builder.Services.AddControllers().AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    });
     builder.Services.AddEndpointsApiExplorer();
     
     // Configure Swagger with API versioning support

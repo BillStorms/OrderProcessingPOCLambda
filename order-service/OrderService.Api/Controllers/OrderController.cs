@@ -93,13 +93,51 @@ public class OrderController : ControllerBase
     }
 
     /// <summary>
-    /// Updates order status and fulfillment details
+    /// Internal status update endpoint used by the fulfillment service.
+    /// </summary>
+    /// <param name="orderId">The unique order identifier</param>
+    /// <param name="requestDto">Status update request with optional fulfillment details</param>
+    /// <param name="internalToken">Internal service token from X-Internal-Token header</param>
+    /// <returns>No content on success</returns>
+    /// <response code="204">Order updated successfully</response>
+    /// <response code="400">Invalid request payload</response>
+    /// <response code="401">Missing or invalid internal token</response>
+    /// <response code="404">Order not found</response>
+    /// <response code="429">Too many requests - rate limit exceeded</response>
+    [HttpPatch("{orderId}/status/internal")]
+    [ApiExplorerSettings(IgnoreApi = true)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
+    public async Task<IActionResult> UpdateOrderStatusInternal(
+        string orderId,
+        [FromBody] UpdateOrderStatusRequestDto requestDto,
+        [FromHeader(Name = "X-Internal-Token")] string? internalToken = null)
+    {
+        // Validate internal token — this endpoint is exempt from Cognito auth (service-to-service only)
+        var expectedToken = Environment.GetEnvironmentVariable("INTERNAL_TOKEN");
+        if (!string.IsNullOrWhiteSpace(expectedToken))
+        {
+            if (internalToken != expectedToken)
+            {
+                _logger.LogWarning("Rejected PATCH /orders/{OrderId}/status/internal — missing or invalid X-Internal-Token", orderId);
+                return Unauthorized(new { Error = "Missing or invalid X-Internal-Token" });
+            }
+        }
+        return await ApplyStatusUpdateAsync(orderId, requestDto, includeEventHeader: true);
+    }
+
+    /// <summary>
+    /// Manually updates order status and fulfillment details from Swagger or API clients.
+    /// Uses standard Bearer token auth and does not require X-Internal-Token.
     /// </summary>
     /// <param name="orderId">The unique order identifier</param>
     /// <param name="requestDto">Status update request with optional fulfillment details</param>
     /// <returns>No content on success</returns>
     /// <response code="204">Order updated successfully</response>
-    /// <response code="400">Invalid status value</response>
+    /// <response code="400">Invalid request payload</response>
     /// <response code="404">Order not found</response>
     /// <response code="429">Too many requests - rate limit exceeded</response>
     [HttpPatch("{orderId}/status")]
@@ -107,10 +145,19 @@ public class OrderController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status429TooManyRequests)]
-    public async Task<IActionResult> UpdateOrderStatus(string orderId, [FromBody] UpdateOrderStatusRequestDto requestDto)
+    public async Task<IActionResult> UpdateOrderStatus(
+        string orderId,
+        [FromBody] UpdateOrderStatusRequestDto requestDto)
     {
-        if (!Enum.TryParse<OrderStatus>(requestDto.Status, out var status))
-            return BadRequest(new { Error = "Invalid status value" });
+        return await ApplyStatusUpdateAsync(orderId, requestDto, includeEventHeader: false);
+    }
+
+    private async Task<IActionResult> ApplyStatusUpdateAsync(
+        string orderId,
+        UpdateOrderStatusRequestDto requestDto,
+        bool includeEventHeader)
+    {
+        var status = requestDto.Status;
 
         FulfillmentDetails? fulfillment = null;
         if (!string.IsNullOrEmpty(requestDto.TrackingNumber) || !string.IsNullOrEmpty(requestDto.Carrier))
@@ -124,12 +171,10 @@ public class OrderController : ControllerBase
             };
         }
 
-        // Read optional X-Event-Id header to help with deduplication
+        // Internal fulfillment path uses X-Event-Id for deduplication; manual path skips it.
         string? eventId = null;
-        if (Request.Headers.TryGetValue("X-Event-Id", out var values))
-        {
+        if (includeEventHeader && Request.Headers.TryGetValue("X-Event-Id", out var values))
             eventId = values.FirstOrDefault();
-        }
 
         var success = await _service.UpdateOrderStatusAsync(orderId, status, fulfillment, eventId);
 

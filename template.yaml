@@ -17,6 +17,11 @@ Parameters:
   OrderServiceBaseUrl:
     Type: String
     Description: "Base URL the fulfillment Lambda uses to PATCH order status (e.g. https://api.example.com)"
+  InternalToken:
+    Type: String
+    Default: "changeme-internal-token"
+    NoEcho: true
+    Description: "Shared secret sent as X-Internal-Token header on service-to-service PATCH calls"
 
 # ── Globals ───────────────────────────────────────────────────────────────────
 Globals:
@@ -48,6 +53,18 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ExpiresAt
         Enabled: true
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "orders-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: OrderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: OrderId
+          KeyType: HASH
 
   # ── SQS: order-events queue + dead-letter queue ────────────────────────────
   OrderEventsDLQ:
@@ -89,6 +106,13 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:GetItem
                 Resource: !GetAtt IdempotencyTable.Arn
+              # DynamoDB orders table
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt OrdersTable.Arn
               # SQS — order service publishes, fulfillment service consumes
               - Effect: Allow
                 Action:
@@ -112,8 +136,10 @@ Resources:
       Environment:
         Variables:
           SQS__OrderEventsQueueUrl: !Ref OrderEventsQueue
+          DynamoDB__OrdersTable: !Ref OrdersTable
           ConnectionStrings__OrderDatabase: !Ref OrderServiceDbConnectionString
           SWAGGER_TOKEN: ""  # optional token to protect swagger UI (set via deploy-time param)
+          INTERNAL_TOKEN: !Ref InternalToken
       Events:
         ApiEvent:
           Type: HttpApi
@@ -144,6 +170,15 @@ Resources:
             ApiId: !Ref OrderApi
             Path: /swagger/v1/swagger.json
             Method: GET
+        # Internal service-to-service route: Fulfillment Lambda PATCHes order status.
+        # More specific path wins over /{proxy+} ANY in API Gateway route matching.
+        # No authorizer on this event — access is gated by X-Internal-Token header in the controller.
+        PatchOrderStatusInternalEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OrderApi
+            Path: /api/v1/orders/{orderId}/status/internal
+            Method: PATCH
 
   # ── Lambda: Fulfillment Service (SQS trigger) ──────────────────────────────
   FulfillmentServiceFunction:
@@ -156,6 +191,7 @@ Resources:
       Environment:
         Variables:
           OrderService__BaseUrl: !Ref OrderServiceBaseUrl
+          INTERNAL_TOKEN: !Ref InternalToken
       Events:
         SqsTrigger:
           Type: SQS
@@ -233,6 +269,9 @@ Outputs:
 
   IdempotencyTableName:
     Value: !Ref IdempotencyTable
+
+  OrdersTableName:
+    Value: !Ref OrdersTable
 
   CognitoUserPoolId:
     Description: "Cognito User Pool Id for docs protection"
