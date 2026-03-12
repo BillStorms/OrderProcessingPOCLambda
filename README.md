@@ -1,376 +1,293 @@
-# Order Processing System POC
+# Order Processing POC - High Level Design (HLD)
 
-A distributed order processing system demonstrating event-driven architecture with microservices, Apache Kafka, and Docker Compose.
 
-**System Goal:** Demonstrate an event-driven, scalable order processing flow using .NET 8, Kafka, and REST APIs.
+## 1. Purpose
 
-## 🏗️ Architecture Overview
+This document describes the high-level architecture of the Order Processing POC. The solution demonstrates an event-driven order workflow using AWS serverless components with .NET 8.
 
-The system consists of two main microservices:
+## 2. Scope and Goals
 
-- **Order Service**: Synchronous API for order creation and status queries; publishes order events to Kafka
-- **Fulfillment Service**: Asynchronous consumer of order events; integrates with a mocked shipping provider and updates order status
+### In Scope
 
-Both services run in Docker and communicate via Kafka and HTTP.
+- Create and read orders via HTTP API.
+- Asynchronous fulfillment triggered by SQS events.
+- Idempotent processing for both consumer and status update paths.
+- Cloud deployment via AWS SAM.
 
-## 🚀 Quick Start
+### Out of Scope
 
-### Prerequisites
+- Production-grade identity/tenant model.
+- Advanced resiliency patterns (saga orchestration, compensating transactions).
+- Full observability stack (distributed tracing, dashboards, alert routing).
 
-- Docker Desktop (or Docker + Docker Compose)
-- .NET 8 SDK (optional, for local development)
-
-### Setup & Run
+## 3. System Context
 
-1. **Clone and configure**
-   ```bash
-   git clone <your-repo-url>
-   cd OrderProcessingSystemPOC
-   
-   # Copy environment template
-   cp .env.example .env
-   
-   # Edit .env if needed (default password works for local dev)
-   ```
+Primary flow:
 
-2. **Start services**
-   ```bash
-   docker compose up --build
-   ```
+1. Client creates an order through API Gateway.
+2. Order Service persists the order and publishes `OrderCreatedEvent` to SQS.
+3. Fulfillment Lambda consumes the message, processes shipment, and updates order status.
+4. Client queries order state.
 
-3. **Test the flow**
-   ```bash
-   curl -X POST http://localhost:5000/api/orders \
-     -H "Content-Type: application/json" \
-     -d '{
-       "customerId": "customer-123",
-       "customerName": "John Doe",
-       "items": [{"productId": "product-456", "quantity": 2}]
-     }'
-   ```
+## 4. Architecture Overview
 
-4. **Watch the logs**
-   ```bash
-   docker compose logs -f order-service
-   docker compose logs -f fulfillment-service
-   ```
+![](http://localhost:63342/markdownPreview/1910435792/docs)
 
-## 🔐 Security Note
-
-**IMPORTANT:** This repository uses environment variables for sensitive configuration.
-- ✅ `.env.example` contains safe placeholder values (committed)
-- ❌ `.env` contains actual secrets (gitignored, never commit!)
-
-See [docs/SECURITY.md](docs/SECURITY.md) for complete security guidelines.
-
-## Functional Requirements
-
-### Order Creation
-- The system shall accept order creation requests via REST API
-- The system shall validate order data (customer info, items, quantities)
-- The system shall assign a unique order ID to each order
-- The system shall publish order events to Kafka when orders are created
+`Client   -> API Gateway HTTP API    -> Order Service Lambda (ASP.NET Core)      -> DynamoDB Orders table (persistence)      -> SQS Order Events queue (publish) SQS Order Events queue   -> Fulfillment Service Lambda (SQS trigger)    -> DynamoDB Idempotency table (dedupe)    -> PATCH Order Service /status/internal SQS DLQ captures poison messages after retry policy.`
 
-### Order Fulfillment
-- The system shall consume order events from Kafka
-- The system shall process orders asynchronously
-- The system shall integrate with a third-party shipping provider (mocked)
-- The system shall update order status based on fulfillment progress
-
-### Order Status Queries
-- The system shall provide REST API to query order status
-- The system shall return current order state and fulfillment details
-
-## Non-Functional Requirements
-
-### Event-Driven Architecture
-- Services shall communicate asynchronously via Kafka
-- Services shall be loosely coupled
-- Event schema shall be well-defined
-
-### Scalability
-- Services shall be independently scalable
-- Kafka shall handle message buffering during load spikes
-
-### Resilience
-- Services shall handle Kafka connection failures gracefully
-- Third-party integration failures shall not block order acceptance
-- Services shall implement retry mechanisms
-
-### Performance SLA
-- Order creation API shall respond within 500ms (P95)
-- Orders shall be picked up by fulfillment service within 5 seconds
-- Third-party shipping integration shall timeout after 10 seconds
-
-## Technical Requirements
-
-### Technology Stack
-- **Language**: .NET 8.0 (C#)
-- **Messaging**: Apache Kafka
-- **API Framework**: ASP.NET Core Web API
-- **Serialization**: JSON
-- **Container Platform**: Docker
-
-### Microservices
-1. **Order Service**: Accepts orders via REST API, publishes to Kafka
-2. **Fulfillment Service**: Consumes orders from Kafka, integrates with shipping provider
-
-### Infrastructure
-- Kafka cluster with at least 1 topic: `order-events`
-- Zookeeper for Kafka coordination
-- Docker Compose for local development
-
-<img width="2360" height="3269" alt="Blank board (1)" src="https://github.com/user-attachments/assets/e98a8be4-aa74-4929-8b34-2e690c6d343d" />
-
-
-## Component design
-
-### Order service
-
-**Responsibilities:**
-
-- **Order Creation API**
-  - **Endpoint:** `POST /api/orders`
-  - **Behavior:**
-    - Validate payload (customer info, items, quantities).
-    - Generate unique `OrderId` (e.g., GUID).
-    - Persist initial order record with status `Created` / `Pending`.
-    - Publish `OrderCreated` event to Kafka topic `order-events`.
-    - Return `201 Created` with `OrderId` and initial status.
-  - **Performance target:** Respond within **500 ms (P95)** by:
-    - Keeping Kafka publish non-blocking (with short timeout).
-    - Avoiding any long-running fulfillment logic in this path.
-
-- **Order Status API**
-  - **Endpoint:** `GET /api/orders/{orderId}`
-  - **Behavior:**
-    - Fetch order from the order store.
-    - Return current status and fulfillment details (e.g., shipping tracking, timestamps, error info).
-
-**Internal components:**
-
-- **API Layer (ASP.NET Core):** Controllers, request/response models, validation.
-- **Application Layer:**
-  - **OrderService** (domain logic: create order, query status).
-  - **EventPublisher** (Kafka producer abstraction).
-- **Persistence Layer:**
-  - Repository for orders (e.g., SQL Server/Postgres or simple in-memory/SQLite for POC).
-- **Integration Layer:**
-  - Kafka producer client with:
-    - Configurable retries.
-    - Reasonable timeouts.
-    - Circuit breaker/fallback logging when Kafka is unavailable.
-
----
-
-### Fulfillment service
-
-**Responsibilities:**
-
-- **Kafka Consumer**
-  - Subscribes to `order-events` topic.
-  - Consumes `OrderCreated` events.
-  - Processes messages asynchronously with consumer group for scalability.
-  - Ensures at-least-once processing (idempotent updates in order store).
-
-- **Order Fulfillment Workflow**
-  - Steps:
-    1. Parse `OrderCreated` event.
-    2. Load or create fulfillment record for the order.
-    3. Call mocked third-party shipping provider.
-    4. Update order status (`Processing` → `Shipped` / `Failed`).
-    5. Optionally publish `OrderFulfilled` event (future extension).
-
-- **Third-party shipping integration**
-  - HTTP client with:
-    - **Timeout:** 10 seconds.
-    - Retry policy with backoff for transient failures.
-    - Clear error handling and logging.
-  - Failures **must not** block order acceptance:
-    - Orders remain in `Pending`/`Retrying` state.
-    - Retries scheduled or re-processed via Kafka.
-
-**Internal components:**
-
-- **Worker/Background Service:**
-  - .NET worker service hosting Kafka consumer loop.
-- **Fulfillment Orchestrator:**
-  - Encapsulates business logic for fulfillment and status transitions.
-- **ShippingClient (Mock):**
-  - Simulates external API with configurable latency/failure.
-- **Persistence:**
-  - Shared order store or dedicated fulfillment store (for POC, can reuse same DB).
-
-**Performance target:**
-
-- Orders should be picked up within **5 seconds**:
-  - Kafka consumer poll interval tuned appropriately.
-  - Sufficient consumer instances for load.
-  - Use Kafka buffering to absorb spikes.
-
----
+## 5. Major Components
 
-## Data model and event schema
+### API Layer
 
-### Order domain model (simplified)
+- API Gateway HTTP API routes requests to `order-service-dev` Lambda.
+- Cognito authorizer protects user-facing API routes.
+- Swagger endpoints are exposed for documentation/testing.
 
-- **Order**
-  - **OrderId:** string (GUID)
-  - **CustomerId:** string
-  - **CustomerName:** string
-  - **Items:** collection of `OrderItem`
-  - **Status:** enum (`Created`, `Pending`, `Processing`, `Shipped`, `Failed`)
-  - **CreatedAt / UpdatedAt:** timestamps
-  - **FulfillmentDetails:** tracking number, shipping status, error messages
+### Order Service Lambda
 
-- **OrderItem**
-  - **ProductId:** string
-  - **Quantity:** int
-  - **UnitPrice:** decimal 
+- Hosts ASP.NET Core API.
+- Handles order creation and reads.
+- Publishes order events through `SqsEventPublisher`.
+- Supports two status update paths:
+    - Public, Swagger-visible: `PATCH /api/v1/orders/{orderId}/status` (Bearer auth).
+    - Internal, hidden: `PATCH /api/v1/orders/{orderId}/status/internal` (X-Internal-Token).
 
-### Kafka event schema
+### Fulfillment Service Lambda
 
-**Topic:** `order-events`  
-**Key:** `OrderId`  
-**Value (JSON):**
+- Triggered by SQS batch events.
+- Performs idempotency claim before processing.
+- Sends status transitions (`Processing`, then `Shipped`/`Failed`) to internal status route.
 
-```json
-{
-  "eventType": "OrderCreated",
-  "orderId": "string",
-  "customer": {
-    "customerId": "string",
-    "name": "string"
-  },
-  "items": [
-    {
-      "productId": "string",
-      "quantity": 1
-    }
-  ],
-  "createdAt": "2025-01-20T21:09:00Z",
-  "metadata": {
-    "source": "OrderService",
-    "correlationId": "string"
-  }
-}
-```
-Design notes:
+### Data Stores
 
-- **Well-defined schema:** Versioned via `eventType` and optional `schemaVersion`.
-- **Loose coupling:** Fulfillment service only depends on event schema, not on Order service internals.
-- **Extensibility:** Future events like `OrderFulfilled`, `OrderFailed` can reuse the same topic or separate topics.
+- `orders-{env}` DynamoDB table stores serialized order payload.
+- `order-idempotency-{env}` DynamoDB table stores processed event claims with TTL.
 
----
+### Messaging
 
-## Cross-cutting concerns and NFR handling
+- `order-events-{env}` SQS queue transports order-created events.
+- `order-events-dlq-{env}` captures events that exceed retry policy.
 
-### Event-driven architecture
+## 6. Security Model
 
-- **Asynchronous communication:** All fulfillment logic is triggered by Kafka events, not synchronous API calls.
-- **Loose coupling:** Order service doesn’t know about fulfillment implementation; it only publishes events.
-- **Schema governance:** Event contracts defined in a shared library or OpenAPI/JSON schema for both services.
+### External API Security
 
----
+- Cognito JWT protects public API routes.
+- Rate limiting and security headers applied in API middleware.
 
-### Scalability
+### Internal Service Security
 
-**Independent scaling:**
+- Internal status route bypasses Cognito and is secured by `X-Internal-Token`.
+- Fulfillment Lambda includes `X-Internal-Token` header for internal PATCH calls.
 
-- Scale **Order Service** instances behind a load balancer for API throughput.
-- Scale **Fulfillment Service** instances (consumer group) to increase parallel processing.
+## 7. Reliability and Idempotency
 
-**Kafka buffering:**
+- Fulfillment consumer idempotency: event claim in DynamoDB prevents duplicate shipment processing.
+- Status update idempotency: event IDs are passed to order update logic for dedupe.
+- SQS redrive policy routes repeatedly failing messages to DLQ.
 
-- During spikes, Kafka topic stores events; fulfillment catches up as capacity allows.
+## 8. Deployment View
 
----
+- Infrastructure defined in `template.yaml`.
+- Build and deploy performed via SAM (`deploy-lambda.sh` in local workflow).
+- Environment-specific resources use `${Environment}` suffixes.
 
-### Resilience
+## 9. Operational Considerations
 
-**Kafka failures:**
+- Logs: CloudWatch logs for both Lambda functions.
+- Health endpoint: `/health` exposed by Order Service API.
+- Validation scripts (local-only) support smoke tests post-deploy.
 
-**Order service:**
+## 10. Risks and Known Tradeoffs (POC)
 
-- On publish failure, log and optionally mark order as `Pending` with `PublishFailed` flag.
-- Use retry with backoff.
-  
-**Fulfillment service:**
+- Internal token is static unless overridden per environment.
+- Public Swagger is useful for demo, but should be further restricted in production.
+- Order payload is stored as serialized JSON in DynamoDB for simplicity over query flexibility.
 
-- Consumer retries on transient errors.
-- On persistent failures, park messages (DLQ pattern for future extension).
+## 11. Success Criteria
 
-**Third-party failures:**
+The architecture is considered successful for POC when:
 
-- Do not block order creation.
+- Orders can be created and retrieved through public API.
+- Fulfillment updates status asynchronously through SQS and internal route.
+- Duplicate/replayed events do not produce duplicate effective state transitions.
+- Deployment is repeatable via SAM with environment-based configuration.
 
-**Fulfillment service:**
+--- 
 
-- Retries shipping calls with backoff.
-- If still failing, set status to `Failed` or `Retrying` and log.
+# Order Processing POC - Low Level Design (LLD)
 
----
+## 1. Purpose
 
-### Performance
+This document defines the implementation-level design for the Lambda-based Order Processing POC. It maps runtime behavior to concrete code modules, request contracts, event schemas, and operational procedures.
 
-**Order creation (≤ 500 ms P95):**
+## 2. Code-Level Component Map
 
-- Minimal synchronous work: validation, DB insert, Kafka publish.
-- No external HTTP calls in this path.
+### Order Service API Host (Lambda)
 
-**Fulfillment pickup (≤ 5 seconds):**
+- Entry point: `lambda/OrderService.Lambda/Program.cs`
+- Controller: `order-service/OrderService.Api/Controllers/OrderController.cs`
+- Service: `order-service/OrderService.Service/Services/OrderService.cs`
+- Repository: `order-service/OrderService.Infrastructure/Repositories/DynamoDbOrderRepository.cs`
+- Publisher: `lambda/OrderService.Lambda/Infrastructure/SqsEventPublisher.cs`
 
-- Kafka consumer with short poll interval.
-- Adequate consumer instances and partitions.
+### Fulfillment Service (Lambda)
 
-**Shipping timeout (10 seconds):**
+- Handler: `lambda/FulfillmentService.Lambda/FulfillmentHandler.cs`
+- Shipping provider: `lambda/FulfillmentService.Lambda/Services/MockShippingProvider.cs`
+- Idempotency store (shared): `Shared/LambdaMigration.Shared/Idempotency/DynamoDbIdempotencyStore.cs`
 
-- HTTP client timeout set to 10 seconds.
-- Circuit breaker to avoid cascading failures.
+### Shared Contracts
 
----
+- Event: `Shared/LambdaMigration.Shared/Events/OrderCreatedEvent.cs`
+- DTO model pieces: `Shared/LambdaMigration.Shared/Models/*`
 
-### Observability
+## 3. API Contracts
 
-**Logging:**
+Base route prefix: `/api/v1/orders`
 
-- Structured logs for each major step (order created, event published, event consumed, shipping called, status updated).
+### 3.1 Create Order
 
-**Metrics (POC-level):**
+- Route: `POST /api/v1/orders`
+- Auth: Cognito Bearer token (API Gateway authorizer)
+- Request body:
+    
+    ![](http://localhost:63342/markdownPreview/920543691/docs)
+    
+    `{   "customerId": "cust-1",   "customerName": "Alice",   "items": [    { "productId": "sku-1", "quantity": 1 }  ] }`
+    
+- Response (`200`):
+    
+    ![](http://localhost:63342/markdownPreview/920543691/docs)
+    
+    `{   "orderId": "guid",   "status": "Created" }`
+    
 
-- Order creation latency.
-- Time from `OrderCreated` event to `Shipped`.
-- Kafka consumer lag.
+### 3.2 Get Order
 
----
+- Route: `GET /api/v1/orders/{orderId}`
+- Auth: Cognito Bearer token
+- Response (`200`):
+    
+    ![](http://localhost:63342/markdownPreview/920543691/docs)
+    
+    `{   "orderId": "guid",   "status": "Created|Pending|Processing|Shipped|Failed",   "fulfillment": {    "trackingNumber": "string|null",     "carrier": "string|null",     "shippedAt": "ISO8601|null",     "errorMessage": "string|null"   } }`
+    
 
-## Deployment and infrastructure
+### 3.3 Manual Status Update (Swagger-visible)
 
-### Docker and local environment
+- Route: `PATCH /api/v1/orders/{orderId}/status`
+- Auth: Cognito Bearer token
+- Request body (`UpdateOrderStatusRequestDto`):
+    
+    ![](http://localhost:63342/markdownPreview/920543691/docs)
+    
+    `{   "status": "Created",   "trackingNumber": null,   "carrier": null,   "shippedAt": null,   "errorMessage": null }`
+    
+- Allowed `status` enum values:
+    - `Created`
+    - `Pending`
+    - `Processing`
+    - `Shipped`
+    - `Failed`
+- Response: `204` on success, `404` if order does not exist.
 
-Docker Compose orchestrates:
+### 3.4 Internal Status Update (hidden from Swagger)
 
-- **Order Service** container.
-- **Fulfillment Service** container.
-- **Kafka + Zookeeper** containers.
-- Optional **DB** container (SQL Server, Postgres, or lightweight alternative).
+- Route: `PATCH /api/v1/orders/{orderId}/status/internal`
+- Auth: `X-Internal-Token` header must match `INTERNAL_TOKEN` env var.
+- Optional dedupe header: `X-Event-Id`.
+- Response: `204` on success, `401` when token is missing/invalid.
 
----
+## 4. Message Contract (SQS)
 
-## Configuration
+### OrderCreatedEvent payload
 
-### Environment variables:
+![](http://localhost:63342/markdownPreview/920543691/docs)
 
-- Kafka bootstrap servers.
-- Topic name (`order-events`).
-- DB connection strings.
-- Shipping provider base URL and timeout.
+`{   "eventType": "OrderCreated",   "eventId": "guid",   "orderId": "guid",   "customer": {    "customerId": "string",     "customerName": "string"   },   "items": [    { "productId": "string", "quantity": 1 }  ],   "createdAt": "ISO8601",   "correlationId": "string" }`
 
-### Profiles:
+Published by `SqsEventPublisher` to `order-events-{env}` queue.
 
-- **Local POC profile** with mocked shipping and simple DB.
-- **Future profiles:** dev/test/prod with real integrations and scaling.
+## 5. Processing and State Transitions
 
+### 5.1 Order Creation Path
 
+1. Controller receives create request.
+2. Service validates request and builds domain `Order`.
+3. Repository persists order (`orders-{env}` table).
+4. Event publisher enqueues `OrderCreatedEvent`.
 
+### 5.2 Fulfillment Path
 
+1. SQS triggers fulfillment Lambda.
+2. Handler deserializes event and runs idempotency claim.
+3. Handler patches internal status route to `Processing` using event suffix key (`#processing`).
+4. Shipping provider returns success/failure.
+5. Handler patches internal status route to `Shipped` or `Failed` using unique event suffix key.
+
+## 6. Idempotency Design
+
+### 6.1 Consumer idempotency
+
+- Store: `order-idempotency-{env}` DynamoDB table.
+- Key: event ID.
+- Operation: conditional `PutItem` with `attribute_not_exists(EventId)`.
+- TTL (`ExpiresAt`) removes stale claims.
+
+### 6.2 Status update idempotency
+
+- Order service repo method `TryMarkEventProcessedAsync` stores namespaced event IDs.
+- Internal header `X-Event-Id` used to avoid duplicate status transitions.
+- Fulfillment uses suffixed event IDs (`#processing`, `#shipped`, `#failed`) so sequential transitions are not blocked.
+
+## 7. Persistence Model
+
+### Orders table item
+
+- Partition key: `OrderId`
+- Payload field: serialized full `Order` JSON in `Payload`
+
+Tradeoff: simplified implementation for POC over query-optimized schema.
+
+## 8. Security Details
+
+- Public API routes protected by Cognito authorizer.
+- Internal status route excluded from Swagger and guarded by shared secret header.
+- Security headers and rate limiting are enabled in API pipeline.
+
+## 9. Deployment Design
+
+Defined in `template.yaml`:
+
+- `AWS::Serverless::Function`: `OrderServiceFunction`, `FulfillmentServiceFunction`
+- `AWS::SQS::Queue`: main queue + DLQ
+- `AWS::DynamoDB::Table`: orders + idempotency
+- `AWS::Serverless::HttpApi`: route definitions, Cognito authorizer, internal route override
+
+## 10. Observability and Operations
+
+- CloudWatch logs for both Lambdas.
+- `/health` endpoint for service checks.
+- DLQ depth check used for failure monitoring.
+
+## 11. Runbook (POC)
+
+### Common smoke checks
+
+1. Get Bearer token and call `POST /orders`.
+2. Verify `GET /orders/{id}` returns `Created` then transitions asynchronously.
+3. Test manual patch with `PATCH /orders/{id}/status` in Swagger.
+4. Verify internal route rejects requests without `X-Internal-Token`.
+
+### Common failure diagnostics
+
+- `401 Missing or invalid X-Internal-Token`: internal route called without valid token.
+- Order stuck in `Processing`: inspect fulfillment logs and internal PATCH responses.
+- DLQ growth: inspect failed messages and replay strategy.
+
+## 12. Testing Coverage Snapshot
+
+- `lambda/Lambda.Tests/FulfillmentHandlerTests.cs`: fulfillment behavior, mixed-batch failures, duplicates.
+- `lambda/Lambda.Tests/InMemoryIdempotencyStoreTests.cs`: idempotency store behavior and concurrency.
+- `order-service/OrderService.Tests/*`: repository and service-level behavior.
