@@ -30,3 +30,9 @@ Thumbs.db
 .aws-sam/
 **/TestResults/
 docs/
+
+# Local-only helper scripts
+/deploy-lambda.sh
+/generate-token.sh
+/postdeploy-validate.sh
+/validate-cloud.sh
